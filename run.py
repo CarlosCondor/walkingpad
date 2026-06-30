@@ -2,6 +2,7 @@ import socket
 import os
 import sys
 import threading
+import time
 import webbrowser
 
 HOST = "0.0.0.0"
@@ -22,13 +23,6 @@ def open_browser():
     webbrowser.open_new(url)
 
 
-def start_bluetooth():
-    from app import _start_ble_thread
-
-    print("Starting Bluetooth connection...")
-    _start_ble_thread()
-
-
 def port_is_available(host, port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -39,18 +33,29 @@ def port_is_available(host, port):
     return True
 
 
+def serve_app(app):
+    from waitress import serve
+
+    serve(app, host=HOST, port=PORT)
+
+
 if __name__ == "__main__":
     ensure_virtualenv_python()
-
-    from waitress import serve
 
     if not port_is_available(HOST, PORT):
         print(f"Port {PORT} is already in use. Stop the other process or change PORT in run.py.")
         raise SystemExit(1)
 
     print(f"Starting production server with Waitress on http://127.0.0.1:{PORT}")
-    from app import app
+    from app import app, run_ble_loop_forever
 
-    threading.Timer(1, start_bluetooth).start()
+    threading.Thread(target=serve_app, args=(app,), daemon=True).start()
     threading.Timer(2, open_browser).start()
-    serve(app, host=HOST, port=PORT)
+
+    try:
+        print("Starting Bluetooth connection...")
+        run_ble_loop_forever()
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        print("Stopping server...")

@@ -279,6 +279,21 @@ def _start_ble_thread():
     connection_failed = False
     threading.Thread(target=_ble_thread, daemon=True).start()
 
+
+def run_ble_loop_forever():
+    """Run Bluetooth on the current thread.
+
+    CoreBluetooth is more stable when it is initialized from the main process
+    thread, so the command-line launcher uses this instead of a background
+    thread.
+    """
+    global connecting, connection_failed
+    if connected or connecting:
+        return
+    connecting = True
+    connection_failed = False
+    _ble_thread()
+
 def _handle_disconnect(client):
     """Callback function to handle unexpected disconnections."""
     global connected, belt_running, connecting, connection_failed
