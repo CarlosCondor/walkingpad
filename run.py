@@ -1,11 +1,18 @@
 import socket
+import os
+import sys
 import threading
 import webbrowser
 
-from waitress import serve
-
 HOST = "0.0.0.0"
 PORT = 5001
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+VENV_PYTHON = os.path.join(BASE_DIR, "venv", "bin", "python")
+
+
+def ensure_virtualenv_python():
+    if os.path.exists(VENV_PYTHON) and os.path.abspath(sys.executable) != VENV_PYTHON:
+        os.execv(VENV_PYTHON, [VENV_PYTHON, *sys.argv])
 
 
 def open_browser():
@@ -13,6 +20,13 @@ def open_browser():
     url = f"http://127.0.0.1:{PORT}"
     print(f"Opening browser to {url}")
     webbrowser.open_new(url)
+
+
+def start_bluetooth():
+    from app import _start_ble_thread
+
+    print("Starting Bluetooth connection...")
+    _start_ble_thread()
 
 
 def port_is_available(host, port):
@@ -26,6 +40,10 @@ def port_is_available(host, port):
 
 
 if __name__ == "__main__":
+    ensure_virtualenv_python()
+
+    from waitress import serve
+
     if not port_is_available(HOST, PORT):
         print(f"Port {PORT} is already in use. Stop the other process or change PORT in run.py.")
         raise SystemExit(1)
@@ -33,5 +51,6 @@ if __name__ == "__main__":
     print(f"Starting production server with Waitress on http://127.0.0.1:{PORT}")
     from app import app
 
+    threading.Timer(1, start_bluetooth).start()
     threading.Timer(2, open_browser).start()
     serve(app, host=HOST, port=PORT)

@@ -531,8 +531,3 @@ def shutdown():
     """Forcefully shut down the Flask application process."""
     logging.info("Server shutting down via forceful exit...")
     os._exit(0)
-
-
-# ── Kick off BLE thread ──────────────────────────────────────────────────
-# The server is no longer started here. This just pre-starts the BLE thread.
-_start_ble_thread()
