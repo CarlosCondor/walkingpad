@@ -12,13 +12,13 @@
         <div class="col-lg col-md-4 col-6">
             <div class="stat-card">
                 <p class="stat-label">Speed</p>
-                <p class="stat-value">0.0 mph</p>
+                <p class="stat-value">0.0 {{ speed_unit }}</p>
             </div>
         </div>
         <div class="col-lg col-md-4 col-6">
             <div class="stat-card">
                 <p class="stat-label">Distance</p>
-                <p class="stat-value">0.0 mi</p>
+                <p class="stat-value">0.0 {{ distance_unit }}</p>
             </div>
         </div>
         <div class="col-lg col-md-4 col-6">
@@ -44,6 +44,8 @@
           .then(response => response.json())
           .then(data => {
               if (data.is_connected === false) {
+                  window.location.reload();
+              } else if (data.is_running === true) {
                   window.location.reload();
               }
           });

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import threading
@@ -6,6 +7,7 @@ import webbrowser
 from threading import Timer
 import time
 from collections import deque
+from concurrent.futures import TimeoutError
 
 from bleak import BleakScanner
 from flask import Flask, render_template, redirect, url_for, jsonify, make_response, request
@@ -30,10 +32,45 @@ MIN_SPEED_KMH = 1.0
 SPEED_STEP = 0.6  # Speed change per button press in km/h
 SLOW_WALK_SPEED_KMH = 4.5 # Approx 2.8 MPH
 
+UNIT_METRIC = "metric"
+UNIT_IMPERIAL = "imperial"
+VALID_UNITS = {UNIT_METRIC, UNIT_IMPERIAL}
+SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "settings.json")
+
+
+def load_measurement_units() -> str:
+    try:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as settings_file:
+            saved_units = json.load(settings_file).get("measurement_units")
+    except (OSError, ValueError):
+        return UNIT_METRIC
+    return saved_units if saved_units in VALID_UNITS else UNIT_METRIC
+
+
+def save_measurement_units(units: str) -> None:
+    with open(SETTINGS_FILE, "w", encoding="utf-8") as settings_file:
+        json.dump({"measurement_units": units}, settings_file, indent=2)
+        settings_file.write("\n")
 
 
 def kcal_estimate(miles: float) -> float:
     return KCAL_PER_MILE * miles
+
+
+def speed_for_display(speed_kmh: float) -> float:
+    return speed_kmh if measurement_units == UNIT_METRIC else speed_kmh * KMH_TO_MPH
+
+
+def distance_for_display(distance_km: float) -> float:
+    return distance_km if measurement_units == UNIT_METRIC else distance_km * KM_TO_MI
+
+
+def speed_unit_label() -> str:
+    return "km/h" if measurement_units == UNIT_METRIC else "mph"
+
+
+def distance_unit_label() -> str:
+    return "km" if measurement_units == UNIT_METRIC else "mi"
 
 # In app.py
 def format_seconds_to_hms(total_seconds):
@@ -53,6 +90,7 @@ controller: Controller | None = None
 _pad_address: str | None = None
 _auto_pause_grace_until = 0
 speed_history = deque(maxlen=15)
+measurement_units = load_measurement_units()
 
 session_active = belt_running = False
 resume_speed_kmh = 2.0  # default if none yet
@@ -62,13 +100,20 @@ current_steps = 0
 current_calories = 0.0
 current_session_active_seconds = 0 
 
-_last_dev_dist = _last_dev_steps = 0
+_last_dev_dist = _last_dev_steps = _last_dev_time = 0
 
 
 # ── Context processor so templates always know flags ────────────────────
 @app.context_processor
 def inject_flags():
-    return dict(connected=connected, connecting=connecting, connection_failed=connection_failed)
+    return dict(
+        connected=connected,
+        connecting=connecting,
+        connection_failed=connection_failed,
+        measurement_units=measurement_units,
+        speed_unit=speed_unit_label(),
+        distance_unit=distance_unit_label(),
+    )
 
 
 # ── BLE helpers ─────────────────────────────────────────────────────────
@@ -103,7 +148,11 @@ async def _connect_to_pad() -> bool:
     controller = Controller()
     await controller.run(dev.address)
 
-    if hasattr(controller, "client") and controller.client:
+    if (
+        hasattr(controller, "client")
+        and controller.client
+        and hasattr(controller.client, "set_disconnected_callback")
+    ):
         controller.client.set_disconnected_callback(_handle_disconnect)
 
     await controller.switch_mode(WalkingPad.MODE_MANUAL)
@@ -114,12 +163,16 @@ async def _connect_to_pad() -> bool:
                 dist = st.get("dist", 0)
                 steps = st.get("steps", 0)
                 speed = st.get("speed", 0)
+                dev_time = st.get("time", 0)
+                belt_state = st.get("belt_state", 0)
             else:
                 dist = getattr(st, "dist", 0)
                 steps = getattr(st, "steps", 0)
                 speed = getattr(st, "speed", 0)
-            process_status_packet(dist, steps, speed)
-            logging.debug(f"Push d={dist} s={steps} v={speed}")
+                dev_time = getattr(st, "time", 0)
+                belt_state = getattr(st, "belt_state", 0)
+            process_status_packet(dist, steps, speed, dev_time, belt_state)
+            logging.debug(f"Push d={dist} s={steps} v={speed} t={dev_time} state={belt_state}")
         except Exception as exc:
             logging.warning(f"status_cb error: {exc}")
 
@@ -133,13 +186,19 @@ async def _connect_to_pad() -> bool:
     return True
 
 
-def process_status_packet(dev_dist, dev_steps, dev_speed):
+def process_status_packet(dev_dist, dev_steps, dev_speed, dev_time=0, belt_state=0):
     """Update cumulative stats from raw values AND handle auto-pause."""
     global belt_running, resume_speed_kmh, _auto_pause_grace_until
     global current_speed_kmh, current_distance_km, current_steps, current_calories
-    global _last_dev_dist, _last_dev_steps
+    global current_session_active_seconds, session_active
+    global _last_dev_dist, _last_dev_steps, _last_dev_time
 
     new_reported_speed_kmh = dev_speed / 10.0
+    device_running = new_reported_speed_kmh > 0
+
+    if device_running:
+        session_active = True
+        belt_running = True
 
     # Continuously populate the speed history with stable, non-zero speeds.
     if belt_running and new_reported_speed_kmh > MIN_SPEED_KMH:
@@ -171,32 +230,21 @@ def process_status_packet(dev_dist, dev_steps, dev_speed):
     current_steps += dev_steps - _last_dev_steps
     _last_dev_steps = dev_steps
 
+    if dev_time < _last_dev_time:
+        _last_dev_time = 0
+    current_session_active_seconds += dev_time - _last_dev_time
+    _last_dev_time = dev_time
+
     current_speed_kmh = new_reported_speed_kmh
     current_calories = kcal_estimate(current_distance_km * KM_TO_MI)
 
 
-async def _stats_monitor():
-    """Active monitor: explicitly request a status packet every second."""
-    global current_session_active_seconds
-    logging.info("Stats monitor started")
-    while belt_running:
-        
-        if belt_running: # Double check, as belt_running can change between await calls
-            current_session_active_seconds += 1
-        
+async def _telemetry_monitor():
+    """Continuously request status packets while connected."""
+    logging.info("Telemetry monitor started")
+    while connected and controller:
         try:
-            status = await controller.ask_stats()
-            if status:
-                if isinstance(status, dict):
-                    dist = status.get("dist", 0)
-                    steps = status.get("steps", 0)
-                    speed = status.get("speed", 0)
-                else:
-                    dist = getattr(status, "dist", 0)
-                    steps = getattr(status, "steps", 0)
-                    speed = getattr(status, "speed", 0)
-                process_status_packet(dist, steps, speed)
-                logging.debug(f"Poll {status}")
+            await controller.ask_stats()
         except Exception as exc:
             logging.warning(f"ask_stats error: {exc}")
         await asyncio.sleep(1)
@@ -215,6 +263,7 @@ def _ble_thread():
 
     connected = True
     connecting = False
+    loop.create_task(_telemetry_monitor())
     try:
         loop.run_forever()
     finally:
@@ -258,8 +307,8 @@ def root():
 
     return render_template(
         template,
-        speed=current_speed_kmh * KMH_TO_MPH,
-        distance=current_distance_km * KM_TO_MI,
+        speed=speed_for_display(current_speed_kmh),
+        distance=distance_for_display(current_distance_km),
         steps=current_steps,
         calories=current_calories,
         time_active=time_active_display 
@@ -274,17 +323,58 @@ def reconnect():
     return redirect(url_for("root"))
 
 
+@app.route("/settings")
+def settings():
+    return render_template(
+        "settings.html",
+        message=request.args.get("message"),
+        error=request.args.get("error"),
+    )
+
+
+@app.route("/settings/units", methods=["POST"])
+def set_units():
+    global measurement_units
+
+    requested_units = request.form.get("units", "")
+    if requested_units not in VALID_UNITS:
+        return redirect(url_for("settings", error="Unsupported unit selection."))
+
+    if not connected or not controller or not ble_loop:
+        return redirect(url_for("settings", error="Connect to the WalkingPad before changing device units."))
+
+    async def apply_units():
+        use_miles = requested_units == UNIT_IMPERIAL
+        await controller.set_pref_units_miles(use_miles)
+        await asyncio.sleep(0.5)
+        await controller.ask_stats()
+
+    try:
+        asyncio.run_coroutine_threadsafe(apply_units(), ble_loop).result(timeout=8)
+    except TimeoutError:
+        return redirect(url_for("settings", error="Timed out while sending the unit setting to the WalkingPad."))
+    except Exception as exc:
+        logging.warning(f"Failed to set units: {exc}")
+        return redirect(url_for("settings", error="Failed to send the unit setting to the WalkingPad."))
+
+    measurement_units = requested_units
+    save_measurement_units(measurement_units)
+    message = "Units changed to metric." if measurement_units == UNIT_METRIC else "Units changed to imperial."
+    return redirect(url_for("settings", message=message))
+
+
 @app.route("/start")
 def start_session():
     """Begin a new session: reset counters, start belt, launch stats monitor."""
     global session_active, belt_running, current_distance_km, current_steps, current_calories, resume_speed_kmh
-    global current_session_active_seconds
+    global current_session_active_seconds, _last_dev_dist, _last_dev_steps, _last_dev_time
 
     if not connected:
         return redirect(url_for("root"))
 
     current_distance_km = current_steps = current_calories = 0.0
     current_session_active_seconds = 0
+    _last_dev_dist = _last_dev_steps = _last_dev_time = 0
     resume_speed_kmh = 2.0
     speed_history.clear() 
 
@@ -295,7 +385,6 @@ def start_session():
         try:
             await controller.start_belt()
             await asyncio.sleep(0.5)
-            asyncio.create_task(_stats_monitor())
         except Exception as exc:
             logging.error(f"Start sequence error: {exc}")
 
@@ -356,9 +445,7 @@ def resume_session():
             await controller.change_speed(int(resume_speed_kmh * 10))
             await asyncio.sleep(0.5) # Allow speed change to propagate
             
-            # Start the monitor if it wasn't running or to be sure
-            asyncio.create_task(_stats_monitor())
-            logging.info("Resume sequence commands sent, monitor ensured.")
+            logging.info("Resume sequence commands sent.")
 
         except Exception as exc:
             logging.error(f"Error during resume sequence, device may have disconnected: {exc}")
@@ -424,8 +511,10 @@ def stats_json():
     data = dict(
         is_connected=connected,      
         is_running=belt_running,     
-        speed=round(current_speed_kmh * KMH_TO_MPH, 1),
-        distance=round(current_distance_km * KM_TO_MI, 2),
+        speed=round(speed_for_display(current_speed_kmh), 1),
+        speed_unit=speed_unit_label(),
+        distance=round(distance_for_display(current_distance_km), 2),
+        distance_unit=distance_unit_label(),
         steps=current_steps,
         calories=round(current_calories),
         time_active=formatted_time_active 

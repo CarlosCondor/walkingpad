@@ -1,4 +1,6 @@
 /.venv
+venv/
+settings.json
 *.pyc
 __pycache__
 icon.ico

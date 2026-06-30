@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block content %}
+<div>
+    <div class="d-flex align-items-center justify-content-between gap-3 mb-4">
+        <h1 class="content-title mb-0">Settings</h1>
+        <a href="{{ url_for('root') }}" class="btn btn-header-close d-flex align-items-center gap-2">
+            <i class="bi bi-arrow-left"></i>
+            <span>Back</span>
+        </a>
+    </div>
+
+    {% if message %}
+    <div class="alert alert-success" role="alert">{{ message }}</div>
+    {% endif %}
+
+    {% if error %}
+    <div class="alert alert-danger" role="alert">{{ error }}</div>
+    {% endif %}
+
+    <div class="stat-card">
+        <form method="post" action="{{ url_for('set_units') }}">
+            <div class="d-flex align-items-start justify-content-between gap-4 flex-wrap mb-4">
+                <div>
+                    <h2 class="h4 fw-bold mb-2">Measurement Units</h2>
+                    <p class="mb-0 text-secondary">Applies the unit preference on the WalkingPad and updates the dashboard display.</p>
+                </div>
+                <span class="badge {{ 'text-bg-success' if connected else 'text-bg-secondary' }}">
+                    {{ 'Connected' if connected else 'Disconnected' }}
+                </span>
+            </div>
+
+            <div class="btn-group w-100 mb-4" role="group" aria-label="Measurement units">
+                <input type="radio" class="btn-check" name="units" id="units-metric" value="metric" autocomplete="off" {{ 'checked' if measurement_units == 'metric' else '' }}>
+                <label class="btn btn-outline-primary py-3" for="units-metric">Metric · km/h</label>
+
+                <input type="radio" class="btn-check" name="units" id="units-imperial" value="imperial" autocomplete="off" {{ 'checked' if measurement_units == 'imperial' else '' }}>
+                <label class="btn btn-outline-primary py-3" for="units-imperial">Imperial · mph</label>
+            </div>
+
+            <button type="submit" class="btn btn-custom-primary d-flex align-items-center gap-2" {{ 'disabled' if not connected else '' }}>
+                <i class="bi bi-check2"></i>
+                <span>Apply Units</span>
+            </button>
+        </form>
+    </div>
+</div>
+{% endblock %}
